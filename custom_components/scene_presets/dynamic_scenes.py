@@ -1,6 +1,7 @@
 import uuid
 import asyncio
 import logging
+import time
 
 from homeassistant.core import Context, callback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -10,6 +11,8 @@ from .manual_change import color_changed, is_scene_context
 from .const import *
 
 _LOGGER = logging.getLogger(__name__)
+
+CONTEXTLESS_REPORT_GRACE_SECONDS = 2.0
 
 
 class DynamicScene:
@@ -28,6 +31,7 @@ class DynamicScene:
             parent_id=getattr(parent_context, "id", None),
         )
         self._unsub_state_listener = None
+        self._last_command_monotonic = None
 
         if self.parameters.get(ATTR_STOP_ON_MANUAL_CHANGE, False):
             light_entity_ids = self.parameters.get("light_entity_ids", [])
@@ -46,6 +50,23 @@ class DynamicScene:
         )
         self._own_context_ids.add(context.id)
         return context
+
+    def _is_recent_contextless_scene_report(self, context):
+        """Handle integrations that lose service context on a device report.
+
+        A very short grace period prevents the scene's own immediate state
+        report from being mistaken for a manual override. Explicit HA user
+        actions are never covered by this fallback.
+        """
+        if getattr(context, "user_id", None) is not None:
+            return False
+        if getattr(context, "parent_id", None) is not None:
+            return False
+        if self._last_command_monotonic is None:
+            return False
+
+        elapsed = time.monotonic() - self._last_command_monotonic
+        return 0 <= elapsed <= CONTEXTLESS_REPORT_GRACE_SECONDS
 
     @callback
     def _handle_state_change(self, event):
@@ -76,6 +97,14 @@ class DynamicScene:
             self._root_context.id,
             self._own_context_ids,
         ):
+            return
+
+        if self._is_recent_contextless_scene_report(context):
+            _LOGGER.debug(
+                "Ignoring contextless color report for %s immediately after dynamic scene %s command",
+                entity_id,
+                self.id,
+            )
             return
 
         self._stop_for_manual_change("external_color_change", entity_id)
@@ -128,6 +157,7 @@ class DynamicScene:
                     ]
 
             step_context = self._new_step_context()
+            self._last_command_monotonic = time.monotonic()
             await apply_preset(
                 self.hass,
                 self.parameters.get(ATTR_SCENE_PRESET_ID),
@@ -161,6 +191,7 @@ class DynamicScene:
 
         self._task = None
         self._own_context_ids.clear()
+        self._last_command_monotonic = None
 
     def to_dict(self):
         return {
