@@ -3,6 +3,9 @@ import importlib
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).parents[1]
@@ -29,6 +32,22 @@ class FakeFavoritesStore:
     async def async_get(self, user_id):
         assert user_id == "user-1"
         return list(self.favorites), self.initialized
+
+
+class FakeAuth:
+    def __init__(self, users):
+        self.users = {user.id: user for user in users}
+
+    async def async_get_user(self, user_id):
+        return self.users.get(user_id)
+
+
+def make_hass(*users):
+    return SimpleNamespace(auth=FakeAuth(users))
+
+
+def make_user(user_id, is_admin=False):
+    return SimpleNamespace(id=user_id, is_admin=is_admin)
 
 
 def test_get_favorites_response_is_dashboard_friendly():
@@ -68,3 +87,67 @@ def test_is_favorite_response_reports_false_for_non_favorite():
     )
 
     assert result["is_favorite"] is False
+
+
+def test_favorite_user_defaults_to_authenticated_actor():
+    module = import_scene_module("favorite_actions")
+    hass = make_hass(make_user("alice"))
+
+    result = asyncio.run(
+        module.async_resolve_favorite_user_id(hass, "alice", None)
+    )
+
+    assert result == "alice"
+
+
+def test_admin_may_target_another_user():
+    module = import_scene_module("favorite_actions")
+    hass = make_hass(
+        make_user("admin", is_admin=True),
+        make_user("bob"),
+    )
+
+    result = asyncio.run(
+        module.async_resolve_favorite_user_id(hass, "admin", "bob")
+    )
+
+    assert result == "bob"
+
+
+def test_non_admin_may_not_target_another_user():
+    module = import_scene_module("favorite_actions")
+    hass = make_hass(
+        make_user("alice"),
+        make_user("bob"),
+    )
+
+    with pytest.raises(PermissionError, match="another Home Assistant user"):
+        asyncio.run(
+            module.async_resolve_favorite_user_id(hass, "alice", "bob")
+        )
+
+
+def test_contextless_automation_may_target_explicit_valid_user():
+    module = import_scene_module("favorite_actions")
+    hass = make_hass(make_user("bob"))
+
+    result = asyncio.run(
+        module.async_resolve_favorite_user_id(hass, None, "bob")
+    )
+
+    assert result == "bob"
+
+
+def test_missing_or_unknown_target_user_is_rejected():
+    module = import_scene_module("favorite_actions")
+    hass = make_hass(make_user("alice"))
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(
+            module.async_resolve_favorite_user_id(hass, None, None)
+        )
+
+    with pytest.raises(ValueError, match="Unknown Home Assistant user"):
+        asyncio.run(
+            module.async_resolve_favorite_user_id(hass, "alice", "missing")
+        )
