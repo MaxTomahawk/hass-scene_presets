@@ -238,6 +238,32 @@ def test_explicit_user_color_change_stops_even_if_it_moves_toward_target(monkeyp
     assert scene.stops == ["scene-id"]
 
 
+def test_delayed_contextless_exact_target_ack_survives_short_initial_transition(monkeypatch):
+    module = import_scene_module("dynamic_scenes")
+    scene = make_dynamic_scene(module)
+    scene.interval = 60
+    move = SimpleNamespace(
+        entity_id="light.one",
+        color_kind="xy",
+        source_color=(0.325, 0.333),
+        target_color=(0.3133, 0.2061),
+        transition=0.5,
+    )
+
+    scene._record_expected_moves([move], started_at=100.0)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 105.37)
+
+    scene._handle_state_change(event(
+        FakeState(attributes={"color_mode": "xy", "xy_color": [0.2397, 0.1489]}),
+        FakeState(
+            attributes={"color_mode": "xy", "xy_color": [0.3133, 0.2061]},
+            context=FakeContext(id="delayed-device-report"),
+        ),
+    ))
+
+    assert scene.stops == []
+
+
 def test_dynamic_loop_executes_five_iterations_without_self_stopping(monkeypatch):
     module = import_scene_module("dynamic_scenes")
     scene = make_dynamic_scene(module, stop_on_manual_change=False)

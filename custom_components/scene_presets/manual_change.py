@@ -19,13 +19,26 @@ class ExpectedColorMove:
     target_color: object
     started_at: float
     transition: float
+    acknowledge_until: float | None = None
 
     def is_active(self, now):
+        """Return whether arbitrary transition progress can still be our own."""
         return now <= (
             self.started_at
             + max(float(self.transition or 0), 0.0)
             + EXPECTED_MOVE_MARGIN_SECONDS
         )
+
+    def is_acknowledgement_active(self, now):
+        """Return whether an exact target report can still acknowledge this move."""
+        return (
+            self.acknowledge_until is not None
+            and now <= self.acknowledge_until
+        )
+
+    def is_relevant(self, now):
+        """Return whether this move can still explain a device state report."""
+        return self.is_active(now) or self.is_acknowledgement_active(now)
 
 
 def _tuple_or_value(value):
@@ -183,7 +196,7 @@ def _progress_tolerance(expected):
 
 def is_expected_move_progress(expected, old_attributes, new_attributes, now):
     """Return True if a contextless state report is compatible with our move."""
-    if expected is None or not expected.is_active(now):
+    if expected is None:
         return False
 
     new_value = _state_value_for_expected_move(expected, new_attributes)
@@ -195,8 +208,19 @@ def is_expected_move_progress(expected, old_attributes, new_attributes, now):
         return False
 
     tolerance = _progress_tolerance(expected)
+
+    # Device integrations can acknowledge the exact requested target well
+    # after a short HA transition has completed. Keep that exact target valid
+    # through the scene's acknowledgement window without treating arbitrary
+    # intermediate colors as scene progress for the same duration.
     if target_distance <= tolerance:
-        return True
+        return (
+            expected.is_active(now)
+            or expected.is_acknowledgement_active(now)
+        )
+
+    if not expected.is_active(now):
+        return False
 
     old_value = _state_value_for_expected_move(expected, old_attributes)
     reference = old_value if old_value is not None else expected.source_color

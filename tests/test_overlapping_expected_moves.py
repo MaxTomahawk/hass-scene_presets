@@ -63,6 +63,7 @@ def make_scene(module):
     scene = object.__new__(module.DynamicScene)
     scene.id = "scene"
     scene.hass = SimpleNamespace()
+    scene.interval = 5
     scene.parameters = {"stop_on_manual_change": True}
     scene._running = True
     scene._stopping = False
