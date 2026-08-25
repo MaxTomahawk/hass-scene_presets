@@ -7,6 +7,7 @@ from homeassistant.exceptions import ServiceValidationError
 from .const import *
 
 from .dynamic_scenes import DynamicSceneManager
+from .favorite_actions import async_get_favorites_response, async_is_favorite_response
 from .favorites import FavoritesStore
 from .presets import apply_preset
 from .view import async_setup_view, async_remove_view
@@ -159,6 +160,18 @@ async def async_setup(hass, config):
     async def get_dynamic_scenes(call):
         return dynamic_scene_manager.get_all_as_dict()
 
+    async def get_favorites(call):
+        user_id = _get_call_user_id(call)
+        return await async_get_favorites_response(favorites_store, user_id)
+
+    async def is_favorite(call):
+        user_id = _get_call_user_id(call)
+        return await async_is_favorite_response(
+            favorites_store,
+            user_id,
+            call.data.get(ATTR_SCENE_PRESET_ID),
+        )
+
     async def add_favorite(call):
         user_id = _get_call_user_id(call)
         try:
@@ -220,6 +233,21 @@ async def async_setup(hass, config):
         DOMAIN,
         SERVICE_STOP_ALL_DYNAMIC_SCENES,
         stop_all_dynamic_scenes,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_FAVORITES,
+        get_favorites,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_IS_FAVORITE,
+        is_favorite,
+        schema=FAVORITE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
 
     hass.services.async_register(
