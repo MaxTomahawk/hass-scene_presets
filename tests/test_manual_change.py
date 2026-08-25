@@ -63,3 +63,59 @@ def test_scene_context_recognizes_own_root_and_child_parent_ids():
     assert is_scene_context("derived", "root", "root", own) is True
     assert is_scene_context("derived", "step-b", "root", own) is True
     assert is_scene_context("external", None, "root", own) is False
+
+
+def test_contextless_xy_report_is_accepted_only_when_it_moves_toward_target():
+    module = load_module()
+    ExpectedColorMove = module["ExpectedColorMove"]
+    expected = ExpectedColorMove(
+        color_kind="xy",
+        source_color=(0.40, 0.30),
+        target_color=(0.60, 0.50),
+        started_at=100.0,
+        transition=45.0,
+    )
+
+    assert module["is_expected_move_progress"](
+        expected,
+        {"xy_color": [0.40, 0.30]},
+        {"xy_color": [0.48, 0.38]},
+        now=110.0,
+    ) is True
+    assert module["is_expected_move_progress"](
+        expected,
+        {"xy_color": [0.48, 0.38]},
+        {"xy_color": [0.60, 0.50]},
+        now=130.0,
+    ) is True
+    assert module["is_expected_move_progress"](
+        expected,
+        {"xy_color": [0.48, 0.38]},
+        {"xy_color": [0.20, 0.65]},
+        now=130.0,
+    ) is False
+
+
+def test_contextless_color_temperature_progress_and_stale_reports():
+    module = load_module()
+    ExpectedColorMove = module["ExpectedColorMove"]
+    expected = ExpectedColorMove(
+        color_kind="color_temp",
+        source_color=2700,
+        target_color=4000,
+        started_at=100.0,
+        transition=20.0,
+    )
+
+    assert module["is_expected_move_progress"](
+        expected,
+        {"color_temp_kelvin": 2700},
+        {"color_temp_kelvin": 3300},
+        now=110.0,
+    ) is True
+    assert module["is_expected_move_progress"](
+        expected,
+        {"color_temp_kelvin": 3300},
+        {"color_temp_kelvin": 3800},
+        now=125.0,
+    ) is False
