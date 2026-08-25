@@ -31,21 +31,28 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
+      - name: Apply feature frontend source transform
+        run: python scripts/apply_feature_frontend.py
       - name: Lint frontend
         run: npm run lint
       - name: Build frontend
         run: npm run build
-      - name: Commit generated frontend bundle
+      - name: Commit frontend source and generated bundle
         shell: bash
         run: |
-          if git diff --quiet -- custom_components/scene_presets/frontend/scene_presets_panel.js; then
-            echo "Frontend bundle already current"
+          PATHS=(
+            js/pages/PresetApplyPage.tsx
+            js/components/DynamicSceneTile.tsx
+            custom_components/scene_presets/frontend/scene_presets_panel.js
+          )
+          if git diff --quiet -- "${PATHS[@]}"; then
+            echo "Frontend source and bundle already current"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add custom_components/scene_presets/frontend/scene_presets_panel.js
-          git commit -m "build: update scene presets frontend"
+          git add "${PATHS[@]}"
+          git commit -m "feat: add manual-stop and user favorites frontend"
           git push
 
   verify-generated:
@@ -64,7 +71,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - run: python scripts/apply_feature_frontend.py
       - run: npm run lint
       - run: npm run build
-      - name: Verify generated frontend is committed
-        run: git diff --exit-code -- custom_components/scene_presets/frontend/scene_presets_panel.js
+      - name: Verify frontend source and bundle are committed
+        run: git diff --exit-code -- js/pages/PresetApplyPage.tsx js/components/DynamicSceneTile.tsx custom_components/scene_presets/frontend/scene_presets_panel.js
