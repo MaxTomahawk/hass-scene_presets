@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import importlib
 import sys
 import types
@@ -42,10 +43,10 @@ def import_scene_module(name):
 
     helpers = types.ModuleType("homeassistant.helpers")
     helpers.__path__ = []
-    event = types.ModuleType("homeassistant.helpers.event")
-    event.async_track_state_change_event = lambda hass, entity_ids, callback: (lambda: None)
+    event_module = types.ModuleType("homeassistant.helpers.event")
+    event_module.async_track_state_change_event = lambda hass, entity_ids, callback: (lambda: None)
     sys.modules["homeassistant.helpers"] = helpers
-    sys.modules["homeassistant.helpers.event"] = event
+    sys.modules["homeassistant.helpers.event"] = event_module
 
     util = types.ModuleType("homeassistant.util")
     util.__path__ = []
@@ -101,24 +102,35 @@ def test_apply_preset_forwards_same_context_to_every_light_call():
     assert all(call[4] is context for call in hass.services.calls)
 
 
-def make_dynamic_scene(module):
+def make_dynamic_scene(module, stop_on_manual_change=True):
     scene = object.__new__(module.DynamicScene)
     scene.id = "scene-id"
-    scene.hass = SimpleNamespace()
-    scene.parameters = {"light_entity_ids": ["light.one"], "stop_on_manual_change": True}
+    scene.hass = FakeHass()
+    scene.interval = 5
+    scene.parameters = {
+        "preset_id": "preset",
+        "light_entity_ids": ["light.one"],
+        "transition": 45,
+        "shuffle": True,
+        "brightness": None,
+        "stop_on_manual_change": stop_on_manual_change,
+    }
     scene._running = True
     scene._stopping = False
     scene._task = None
     scene._unsub_state_listener = None
     scene._root_context = FakeContext(id="root", user_id="user")
     scene._own_context_ids = set()
-    scene._last_command_monotonic = None
+    scene._own_context_order = deque()
+    scene._expected_moves = {}
+    scene._stop_reason = None
+    scene._last_error = None
     scene.stops = []
     scene.self_destruct_callback = lambda scene_id: scene.stops.append(scene_id)
     return scene
 
 
-def test_dynamic_step_contexts_are_unique_and_share_root_parent():
+def test_dynamic_step_contexts_are_unique_share_root_and_stay_bounded():
     module = import_scene_module("dynamic_scenes")
     scene = make_dynamic_scene(module)
 
@@ -128,8 +140,11 @@ def test_dynamic_step_contexts_are_unique_and_share_root_parent():
     assert first.id != second.id
     assert first.parent_id == "root"
     assert second.parent_id == "root"
-    assert first.id in scene._own_context_ids
-    assert second.id in scene._own_context_ids
+
+    for _ in range(200):
+        scene._new_step_context()
+
+    assert len(scene._own_context_ids) <= module.MAX_OWN_CONTEXT_IDS
 
 
 def event(old_state, new_state):
@@ -170,54 +185,119 @@ def test_turning_any_target_off_stops_scene():
     ))
 
     assert scene.stops == ["scene-id"]
+    assert scene._stop_reason == "light_turned_off"
 
 
-def test_contextless_color_report_immediately_after_scene_command_is_ignored(monkeypatch):
+def test_contextless_report_toward_expected_target_is_ignored_but_divergence_stops(monkeypatch):
     module = import_scene_module("dynamic_scenes")
+    manual = import_scene_module("manual_change")
     scene = make_dynamic_scene(module)
-    scene._last_command_monotonic = 100.0
-    monkeypatch.setattr(module.time, "monotonic", lambda: 101.0)
+    scene._expected_moves["light.one"] = manual.ExpectedColorMove(
+        color_kind="xy",
+        source_color=(0.4, 0.3),
+        target_color=(0.6, 0.5),
+        started_at=100.0,
+        transition=45,
+    )
+    monkeypatch.setattr(module.time, "monotonic", lambda: 110.0)
 
     scene._handle_state_change(event(
         FakeState(attributes={"color_mode": "xy", "xy_color": [0.4, 0.3]}),
-        FakeState(
-            attributes={"color_mode": "xy", "xy_color": [0.5, 0.3]},
-            context=FakeContext(id="device-report"),
-        ),
+        FakeState(attributes={"color_mode": "xy", "xy_color": [0.48, 0.38]}, context=FakeContext(id="device-report")),
     ))
-
     assert scene.stops == []
 
+    scene._handle_state_change(event(
+        FakeState(attributes={"color_mode": "xy", "xy_color": [0.48, 0.38]}),
+        FakeState(attributes={"color_mode": "xy", "xy_color": [0.2, 0.65]}, context=FakeContext(id="physical-change")),
+    ))
+    assert scene.stops == ["scene-id"]
 
-def test_contextless_color_report_after_grace_period_stops_scene(monkeypatch):
+
+def test_explicit_user_color_change_stops_even_if_it_moves_toward_target(monkeypatch):
     module = import_scene_module("dynamic_scenes")
+    manual = import_scene_module("manual_change")
     scene = make_dynamic_scene(module)
-    scene._last_command_monotonic = 100.0
-    monkeypatch.setattr(module.time, "monotonic", lambda: 103.5)
+    scene._expected_moves["light.one"] = manual.ExpectedColorMove(
+        color_kind="xy",
+        source_color=(0.4, 0.3),
+        target_color=(0.6, 0.5),
+        started_at=100.0,
+        transition=45,
+    )
+    monkeypatch.setattr(module.time, "monotonic", lambda: 110.0)
 
     scene._handle_state_change(event(
         FakeState(attributes={"color_mode": "xy", "xy_color": [0.4, 0.3]}),
         FakeState(
-            attributes={"color_mode": "xy", "xy_color": [0.5, 0.3]},
-            context=FakeContext(id="external-device"),
+            attributes={"color_mode": "xy", "xy_color": [0.48, 0.38]},
+            context=FakeContext(id="user-change", user_id="other-user"),
         ),
     ))
 
     assert scene.stops == ["scene-id"]
 
 
-def test_explicit_user_color_change_stops_even_during_grace_period(monkeypatch):
+def test_dynamic_loop_executes_five_iterations_without_self_stopping(monkeypatch):
     module = import_scene_module("dynamic_scenes")
-    scene = make_dynamic_scene(module)
-    scene._last_command_monotonic = 100.0
-    monkeypatch.setattr(module.time, "monotonic", lambda: 101.0)
+    scene = make_dynamic_scene(module, stop_on_manual_change=False)
+    applied = []
+    sleeps = 0
+    move = SimpleNamespace(
+        entity_id="light.one",
+        color_kind="xy",
+        source_color=(0.4, 0.3),
+        target_color=(0.5, 0.4),
+        transition=5,
+        service_data={"entity_id": "light.one", "xy_color": (0.5, 0.4)},
+    )
 
-    scene._handle_state_change(event(
-        FakeState(attributes={"color_mode": "xy", "xy_color": [0.4, 0.3]}),
-        FakeState(
-            attributes={"color_mode": "xy", "xy_color": [0.5, 0.3]},
-            context=FakeContext(id="user-change", user_id="other-user"),
-        ),
-    ))
+    def build_moves(*args, **kwargs):
+        return [move]
 
+    async def apply_moves(hass, moves, context=None):
+        applied.append((list(moves), context))
+
+    async def fake_sleep(interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 5:
+            scene._running = False
+
+    monkeypatch.setattr(module, "build_light_moves", build_moves, raising=False)
+    monkeypatch.setattr(module, "apply_light_moves", apply_moves, raising=False)
+    monkeypatch.setattr(module.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(scene._loop())
+
+    assert len(applied) == 5
+    assert scene.stops == []
+    assert scene._last_error is None
+
+
+def test_iteration_exception_cleans_up_instead_of_leaving_zombie(monkeypatch):
+    module = import_scene_module("dynamic_scenes")
+    scene = make_dynamic_scene(module, stop_on_manual_change=False)
+    move = SimpleNamespace(
+        entity_id="light.one",
+        color_kind="xy",
+        source_color=(0.4, 0.3),
+        target_color=(0.5, 0.4),
+        transition=5,
+        service_data={"entity_id": "light.one"},
+    )
+
+    monkeypatch.setattr(module, "build_light_moves", lambda *a, **k: [move], raising=False)
+
+    async def fail_apply(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "apply_light_moves", fail_apply, raising=False)
+    monkeypatch.setattr(module, "apply_preset", fail_apply, raising=False)
+
+    asyncio.run(scene._loop())
+
+    assert scene._running is False
+    assert scene._stop_reason == "error"
+    assert "RuntimeError: boom" in scene._last_error
     assert scene.stops == ["scene-id"]

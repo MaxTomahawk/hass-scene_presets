@@ -140,11 +140,17 @@ stop_all_dynamic_scenes:
 
 get_favorites:
   name: "Get favorites"
-  description: Return the current Home Assistant user's favorite preset IDs for use with response_variable in scripts and automations
+  description: Return favorite preset IDs for a Home Assistant user for use with response_variable in scripts and automations
+  fields:
+    user_id:
+      name: "User ID"
+      description: "Optional Home Assistant user ID. Defaults to the user running the action."
+      selector:
+        text:
 
 is_favorite:
   name: "Is favorite"
-  description: Return whether a preset is a favorite for the current Home Assistant user
+  description: Return whether a preset is a favorite for a Home Assistant user
   fields:
     preset_id:
       name: "Preset"
@@ -152,10 +158,31 @@ is_favorite:
       required: true
       selector:
         text:
+    user_id:
+      name: "User ID"
+      description: "Optional Home Assistant user ID. Defaults to the user running the action."
+      selector:
+        text:
+
+set_favorites:
+  name: "Set favorites"
+  description: Replace all favorite presets for a Home Assistant user
+  fields:
+    favorites:
+      name: "Favorites"
+      description: "Preset IDs that should be favorites"
+      required: true
+      selector:
+        object:
+    user_id:
+      name: "User ID"
+      description: "Optional Home Assistant user ID. Defaults to the user running the action."
+      selector:
+        text:
 
 add_favorite:
   name: "Add favorite"
-  description: Add a preset to the current Home Assistant user's favorites
+  description: Add a preset to a Home Assistant user's favorites
   fields:
     preset_id:
       name: "Preset"
@@ -163,10 +190,15 @@ add_favorite:
       required: true
       selector:
         text:
+    user_id:
+      name: "User ID"
+      description: "Optional Home Assistant user ID. Defaults to the user running the action."
+      selector:
+        text:
 
 remove_favorite:
   name: "Remove favorite"
-  description: Remove a preset from the current Home Assistant user's favorites
+  description: Remove a preset from a Home Assistant user's favorites
   fields:
     preset_id:
       name: "Preset"
@@ -174,14 +206,24 @@ remove_favorite:
       required: true
       selector:
         text:
+    user_id:
+      name: "User ID"
+      description: "Optional Home Assistant user ID. Defaults to the user running the action."
+      selector:
+        text:
 
 toggle_favorite:
   name: "Toggle favorite"
-  description: Toggle a preset in the current Home Assistant user's favorites
+  description: Toggle a preset in a Home Assistant user's favorites
   fields:
     preset_id:
       name: "Preset"
       description: "The preset ID to toggle"
       required: true
+      selector:
+        text:
+    user_id:
+      name: "User ID"
+      description: "Optional Home Assistant user ID. Defaults to the user running the action."
       selector:
         text:
