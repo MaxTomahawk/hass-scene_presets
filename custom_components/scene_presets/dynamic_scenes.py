@@ -1,18 +1,24 @@
 import uuid
 import asyncio
+from collections import deque
 import logging
 import time
 
 from homeassistant.core import Context, callback
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .presets import apply_preset
-from .manual_change import color_changed, is_scene_context
+from .color_moves import apply_light_moves, build_light_moves
+from .manual_change import (
+    ExpectedColorMove,
+    color_changed,
+    is_expected_move_progress,
+    is_scene_context,
+)
 from .const import *
 
 _LOGGER = logging.getLogger(__name__)
 
-CONTEXTLESS_REPORT_GRACE_SECONDS = 2.0
+MAX_OWN_CONTEXT_IDS = 64
 
 
 class DynamicScene:
@@ -26,12 +32,15 @@ class DynamicScene:
         self.parameters = parameters
         self.self_destruct_callback = self_destruct_callback
         self._own_context_ids = set()
+        self._own_context_order = deque()
+        self._expected_moves = {}
+        self._stop_reason = None
+        self._last_error = None
         self._root_context = Context(
             user_id=getattr(parent_context, "user_id", None),
             parent_id=getattr(parent_context, "id", None),
         )
         self._unsub_state_listener = None
-        self._last_command_monotonic = None
 
         if self.parameters.get(ATTR_STOP_ON_MANUAL_CHANGE, False):
             light_entity_ids = self.parameters.get("light_entity_ids", [])
@@ -43,30 +52,36 @@ class DynamicScene:
                 )
 
     def _new_step_context(self):
-        """Create and remember one context for a complete preset iteration."""
+        """Create and remember one bounded context for a complete iteration."""
         context = Context(
             user_id=self._root_context.user_id,
             parent_id=self._root_context.id,
         )
+
+        if not hasattr(self, "_own_context_order"):
+            self._own_context_order = deque()
         self._own_context_ids.add(context.id)
+        self._own_context_order.append(context.id)
+        while len(self._own_context_order) > MAX_OWN_CONTEXT_IDS:
+            expired = self._own_context_order.popleft()
+            self._own_context_ids.discard(expired)
+
         return context
 
-    def _is_recent_contextless_scene_report(self, context):
-        """Handle integrations that lose service context on a device report.
+    def _record_expected_moves(self, moves, started_at):
+        if not self.parameters.get(ATTR_STOP_ON_MANUAL_CHANGE, False):
+            return
 
-        A very short grace period prevents the scene's own immediate state
-        report from being mistaken for a manual override. Explicit HA user
-        actions are never covered by this fallback.
-        """
-        if getattr(context, "user_id", None) is not None:
-            return False
-        if getattr(context, "parent_id", None) is not None:
-            return False
-        if self._last_command_monotonic is None:
-            return False
-
-        elapsed = time.monotonic() - self._last_command_monotonic
-        return 0 <= elapsed <= CONTEXTLESS_REPORT_GRACE_SECONDS
+        for move in moves:
+            if move.color_kind is None or move.target_color is None:
+                continue
+            self._expected_moves[move.entity_id] = ExpectedColorMove(
+                color_kind=move.color_kind,
+                source_color=move.source_color,
+                target_color=move.target_color,
+                started_at=started_at,
+                transition=move.transition,
+            )
 
     @callback
     def _handle_state_change(self, event):
@@ -78,7 +93,10 @@ class DynamicScene:
         if old_state is None or new_state is None:
             return
 
-        entity_id = event.data.get("entity_id", getattr(new_state, "entity_id", "unknown"))
+        entity_id = event.data.get(
+            "entity_id",
+            getattr(new_state, "entity_id", "unknown"),
+        )
 
         if new_state.state == "off":
             self._stop_for_manual_change("light_turned_off", entity_id)
@@ -91,17 +109,32 @@ class DynamicScene:
             return
 
         context = new_state.context
+        context_id = getattr(context, "id", None)
+        parent_id = getattr(context, "parent_id", None)
         if is_scene_context(
-            context.id,
-            context.parent_id,
+            context_id,
+            parent_id,
             self._root_context.id,
             self._own_context_ids,
         ):
             return
 
-        if self._is_recent_contextless_scene_report(context):
+        # A Home Assistant user explicitly causing an unknown-context color
+        # change is always an override, even if that color happens to be on
+        # the path toward our current target.
+        if getattr(context, "user_id", None) is not None:
+            self._stop_for_manual_change("external_color_change", entity_id)
+            return
+
+        expected_move = self._expected_moves.get(entity_id)
+        if is_expected_move_progress(
+            expected_move,
+            old_state.attributes,
+            new_state.attributes,
+            time.monotonic(),
+        ):
             _LOGGER.debug(
-                "Ignoring contextless color report for %s immediately after dynamic scene %s command",
+                "Ignoring expected contextless color progress for %s in dynamic scene %s",
                 entity_id,
                 self.id,
             )
@@ -113,6 +146,7 @@ class DynamicScene:
         if self._stopping or not self._running:
             return
 
+        self._stop_reason = reason
         self._stopping = True
         _LOGGER.info(
             "Stopping dynamic scene %s because of %s on %s",
@@ -122,55 +156,74 @@ class DynamicScene:
         )
         self.self_destruct_callback(self.id)
 
+    def _self_destruct(self, reason, error=None):
+        if self._stopping:
+            return
+
+        self._stop_reason = reason
+        if error is not None:
+            self._last_error = f"{type(error).__name__}: {error}"
+        self._running = False
+        self._stopping = True
+        self.self_destruct_callback(self.id)
+
     async def _loop(self):
         run_count = 0
 
-        while self._running:
-            light_entity_ids = self.parameters.get("light_entity_ids")
-            transition = self.parameters.get(ATTR_TRANSITION)
-            smart_shuffle = True
+        try:
+            while self._running:
+                light_entity_ids = list(
+                    self.parameters.get("light_entity_ids", [])
+                )
+                transition = self.parameters.get(ATTR_TRANSITION)
+                smart_shuffle = True
 
-            if run_count == 0:
-                transition = 0.5
-                smart_shuffle = False
-            else:
-                entity_states = [
-                    (entity_id, self.hass.states.get(entity_id))
-                    for entity_id in light_entity_ids
-                    if entity_id is not None
-                ]
-                lights_on = len([
-                    state for _, state in entity_states
-                    if state is not None and state.state == "on"
-                ])
-
-                if lights_on == 0:
-                    self._running = False
-                    self.self_destruct_callback(self.id)
-                    return
+                if run_count == 0:
+                    transition = 0.5
+                    smart_shuffle = False
                 else:
-                    # With manual-change stop disabled, preserve the existing behavior:
-                    # explicitly turned-off lights are skipped on subsequent iterations.
-                    light_entity_ids = [
-                        entity_id for entity_id, state in entity_states
+                    entity_states = [
+                        (entity_id, self.hass.states.get(entity_id))
+                        for entity_id in light_entity_ids
+                        if entity_id is not None
+                    ]
+                    active_entity_ids = [
+                        entity_id
+                        for entity_id, state in entity_states
                         if state is not None and state.state == "on"
                     ]
 
-            step_context = self._new_step_context()
-            self._last_command_monotonic = time.monotonic()
-            await apply_preset(
-                self.hass,
-                self.parameters.get(ATTR_SCENE_PRESET_ID),
-                light_entity_ids,
-                transition,
-                self.parameters.get(ATTR_SHUFFLE),
-                smart_shuffle,
-                self.parameters.get(ATTR_BRIGHTNESS, None),
-                context=step_context,
-            )
-            run_count += 1
+                    if not active_entity_ids:
+                        self._self_destruct("all_lights_off")
+                        return
 
-            await asyncio.sleep(self.interval)
+                    light_entity_ids = active_entity_ids
+
+                moves = build_light_moves(
+                    self.hass,
+                    self.parameters.get(ATTR_SCENE_PRESET_ID),
+                    light_entity_ids,
+                    transition,
+                    self.parameters.get(ATTR_SHUFFLE),
+                    smart_shuffle,
+                    self.parameters.get(ATTR_BRIGHTNESS, None),
+                )
+                step_context = self._new_step_context()
+                started_at = time.monotonic()
+                self._record_expected_moves(moves, started_at)
+                await apply_light_moves(
+                    self.hass,
+                    moves,
+                    context=step_context,
+                )
+                run_count += 1
+
+                await asyncio.sleep(self.interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # integration boundary: never leave a zombie task
+            _LOGGER.exception("Dynamic scene %s failed", self.id)
+            self._self_destruct("error", err)
 
     def start_loop(self):
         if self._running:
@@ -178,9 +231,13 @@ class DynamicScene:
         self._running = True
         self._task = self.hass.create_task(self._loop())
 
-    def stop_loop(self):
+    def stop_loop(self, reason=None):
         self._running = False
         self._stopping = True
+        if reason is not None and self._stop_reason is None:
+            self._stop_reason = reason
+        elif self._stop_reason is None:
+            self._stop_reason = "stopped"
 
         if self._unsub_state_listener:
             self._unsub_state_listener()
@@ -191,7 +248,8 @@ class DynamicScene:
 
         self._task = None
         self._own_context_ids.clear()
-        self._last_command_monotonic = None
+        self._own_context_order.clear()
+        self._expected_moves.clear()
 
     def to_dict(self):
         return {
@@ -199,6 +257,8 @@ class DynamicScene:
             "interval": self.interval,
             "parameters": self.parameters,
             "running": self._running,
+            "stop_reason": self._stop_reason,
+            "last_error": self._last_error,
         }
 
     def __del__(self):
@@ -224,18 +284,18 @@ class DynamicSceneManager:
     def get_by_id(self, id):
         return self.dynamic_scenes.get(id)
 
-    def delete_by_id(self, id):
+    def delete_by_id(self, id, reason=None):
         active_scene = self.dynamic_scenes.get(id)
 
         if active_scene:
-            active_scene.stop_loop()
+            active_scene.stop_loop(reason=reason)
             del self.dynamic_scenes[id]
 
     def stop_all(self):
         scenes_to_delete = []
 
         for scene in self.dynamic_scenes.values():
-            scene.stop_loop()
+            scene.stop_loop(reason="service_stop")
             scenes_to_delete.append(scene.id)
 
         for scene_id in scenes_to_delete:
@@ -247,7 +307,7 @@ class DynamicSceneManager:
         for scene in self.dynamic_scenes.values():
             entity_ids = scene.parameters.get("light_entity_ids", [])
             if entity_id in entity_ids:
-                scene.stop_loop()
+                scene.stop_loop(reason="superseded")
                 scenes_to_delete.append(scene.id)
 
         for scene_id in scenes_to_delete:
@@ -257,9 +317,9 @@ class DynamicSceneManager:
         return list(self.dynamic_scenes.values())
 
     def get_all_as_dict(self):
-        scenes_dict = {"dynamic_scenes": []}
-
-        for scene in self.dynamic_scenes.values():
-            scenes_dict["dynamic_scenes"].append(scene.to_dict())
-
-        return scenes_dict
+        return {
+            "dynamic_scenes": [
+                scene.to_dict()
+                for scene in self.dynamic_scenes.values()
+            ]
+        }
