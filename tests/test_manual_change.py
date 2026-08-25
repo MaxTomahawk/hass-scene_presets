@@ -16,6 +16,24 @@ def test_brightness_only_change_is_not_a_color_change():
     assert module["color_changed"](old, new) is False
 
 
+def test_small_reporting_noise_is_not_a_color_change():
+    module = load_module()
+    color_changed = module["color_changed"]
+
+    assert color_changed(
+        {"color_mode": "xy", "xy_color": [0.4000, 0.3000]},
+        {"color_mode": "xy", "xy_color": [0.4010, 0.2990]},
+    ) is False
+    assert color_changed(
+        {"color_mode": "color_temp", "color_temp_kelvin": 3000},
+        {"color_mode": "color_temp", "color_temp_kelvin": 3015},
+    ) is False
+    assert color_changed(
+        {"color_mode": "rgb", "rgb_color": [255, 100, 50]},
+        {"color_mode": "rgb", "rgb_color": [254, 101, 50]},
+    ) is False
+
+
 def test_xy_and_color_temperature_changes_are_color_changes():
     module = load_module()
     assert module["color_changed"](
