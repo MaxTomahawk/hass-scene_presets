@@ -138,6 +138,21 @@ stop_all_dynamic_scenes:
   name: "Stop all dynamic scenes"
   description: Stops all currently running dynamic scenes
 
+get_favorites:
+  name: "Get favorites"
+  description: Return the current Home Assistant user's favorite preset IDs for use with response_variable in scripts and automations
+
+is_favorite:
+  name: "Is favorite"
+  description: Return whether a preset is a favorite for the current Home Assistant user
+  fields:
+    preset_id:
+      name: "Preset"
+      description: "The preset ID to check"
+      required: true
+      selector:
+        text:
+
 add_favorite:
   name: "Add favorite"
   description: Add a preset to the current Home Assistant user's favorites
