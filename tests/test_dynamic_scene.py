@@ -107,6 +107,7 @@ def make_dynamic_scene(module):
     scene.hass = SimpleNamespace()
     scene.parameters = {"light_entity_ids": ["light.one"], "stop_on_manual_change": True}
     scene._running = True
+    scene._stopping = False
     scene._task = None
     scene._unsub_state_listener = None
     scene._root_context = FakeContext(id="root", user_id="user")
