@@ -21,9 +21,11 @@ const DEFAULT_TUNABLE_SETTINGS = {
     dynamic: false,
     dynamicTransitionValue: 45,
     dynamicIntervalValue: 60,
+    stopOnManualChange: false,
 };
 
 const DYNAMIC_SCENE_REFRESH_INTERVAL = 30*1000;
+const LEGACY_FAVORITES_KEY = "scene_presets_apply_page_favorite_presets";
 
 export const Switch :React.FunctionComponent<{
     label: string,
@@ -187,6 +189,7 @@ export const PresetApplyPage: React.FunctionComponent<{
     const [dynamic, setDynamic] = useLocalStorage<boolean>("scene_presets_apply_page_dynamic", DEFAULT_TUNABLE_SETTINGS.dynamic);
     const [dynamicTransitionValue, setDynamicTransitionValue] = useLocalStorage<number>("scene_presets_apply_page_dynamic_transition_value", DEFAULT_TUNABLE_SETTINGS.dynamicTransitionValue);
     const [dynamicIntervalValue, setDynamicIntervalValue] = useLocalStorage<number>("scene_presets_apply_page_dynamic_interval_value", DEFAULT_TUNABLE_SETTINGS.dynamicIntervalValue);
+    const [stopOnManualChange, setStopOnManualChange] = useLocalStorage<boolean>("scene_presets_apply_page_stop_on_manual_change", DEFAULT_TUNABLE_SETTINGS.stopOnManualChange);
 
     const [lastDynamicSceneRefresh, setLastDynamicSceneRefresh] = useState(0);
 
@@ -195,11 +198,62 @@ export const PresetApplyPage: React.FunctionComponent<{
     const memoizedDynamicSceneIds = useMemo(() => dynamicSceneIds, [dynamicSceneIds]); // Does this make sense or is this a useless attempt at optimization?
 
 
-    const [favoritePresets, setFavoritePresets] = useLocalStorage<Array<string>>("scene_presets_apply_page_favorite_presets", []);
+    const [favoritePresets, setFavoritePresets] = useState<Array<string>>([]);
 
     const [automationDialogOpen, setAutomationDialogOpen] = useState<boolean>(false);
     const [lastActionPayload, setLastActionPayload] = useState<any>({});
     const [prettyLastActionPayload, setPrettyLastActionPayload] = useState<string>("");
+
+    const fetchFavoritePresets = React.useCallback(() => {
+        hass.callWS({
+            type: "scene_presets/get_favorites",
+        }).then(result => {
+            if (result?.initialized) {
+                setFavoritePresets(result.favorites ?? []);
+                window.localStorage.removeItem(LEGACY_FAVORITES_KEY);
+                return;
+            }
+
+            const validPresetIds = new Set(presets.map(preset => preset.id));
+            let legacyFavorites: Array<string> = [];
+
+            try {
+                const legacyRaw = window.localStorage.getItem(LEGACY_FAVORITES_KEY);
+                const legacyParsed = legacyRaw ? JSON.parse(legacyRaw) : [];
+
+                if (Array.isArray(legacyParsed)) {
+                    legacyFavorites = [...new Set(
+                        legacyParsed.filter(
+                            presetId => typeof presetId === "string" && validPresetIds.has(presetId)
+                        )
+                    )] as Array<string>;
+                }
+            } catch (error) {
+                console.warn("Scene Presets could not read legacy favorites", error);
+            }
+
+            return hass.callWS({
+                type: "scene_presets/set_favorites",
+                favorites: legacyFavorites,
+            }).then(saved => {
+                setFavoritePresets(saved?.favorites ?? []);
+                window.localStorage.removeItem(LEGACY_FAVORITES_KEY);
+            });
+        }).catch(error => {
+            console.warn("Scene Presets could not load favorites", error);
+        });
+    }, [hass, presets]);
+
+    const saveFavoritePresets = React.useCallback((favorites: Array<string>) => {
+        hass.callWS({
+            type: "scene_presets/set_favorites",
+            favorites: favorites,
+        }).then(result => {
+            setFavoritePresets(result?.favorites ?? []);
+        }).catch(error => {
+            console.warn("Scene Presets could not save favorites", error);
+        });
+    }, [hass]);
 
     const fetchActiveDynamicScenes = React.useCallback(() => {
         hass.callWS({
@@ -213,7 +267,8 @@ export const PresetApplyPage: React.FunctionComponent<{
                 scenes[s.id] = {
                     preset_id: s.parameters.preset_id,
                     interval: s.interval,
-                    transition: s.parameters.transition
+                    transition: s.parameters.transition,
+                    stop_on_manual_change: s.parameters.stop_on_manual_change ?? false
                 };
             });
 
@@ -245,7 +300,8 @@ export const PresetApplyPage: React.FunctionComponent<{
                 payload = {
                     ...payload,
                     transition: dynamicTransitionValue,
-                    interval: dynamicIntervalValue
+                    interval: dynamicIntervalValue,
+                    stop_on_manual_change: stopOnManualChange
                 };
 
                 service = "start_dynamic_scene";
@@ -279,7 +335,7 @@ export const PresetApplyPage: React.FunctionComponent<{
             customBrightness, customBrightnessValue,
             customTransition, customTransitionValue,
 
-            dynamic, dynamicIntervalValue, dynamicTransitionValue,
+            dynamic, dynamicIntervalValue, dynamicTransitionValue, stopOnManualChange,
             fetchActiveDynamicScenes
         ]
     );
@@ -326,11 +382,11 @@ export const PresetApplyPage: React.FunctionComponent<{
                 }}
                 isFav={isFav}
                 onFavClick={() => {
-                    if (!favoritePresets.includes(preset.id)) {
-                        setFavoritePresets([...favoritePresets, preset.id]);
-                    } else {
-                        setFavoritePresets(favoritePresets.filter(e => e !== preset.id));
-                    }
+                    const nextFavorites = !favoritePresets.includes(preset.id)
+                        ? [...favoritePresets, preset.id]
+                        : favoritePresets.filter(e => e !== preset.id);
+
+                    saveFavoritePresets(nextFavorites);
                 }}
             />;
 
@@ -343,7 +399,7 @@ export const PresetApplyPage: React.FunctionComponent<{
             all: allTiles,
             favoriteIds: favoriteTiles,
         };
-    }, [presets, favoritePresets, handlePresetTap, setFavoritePresets]);
+    }, [presets, favoritePresets, handlePresetTap, saveFavoritePresets]);
 
     const presetMap = useMemo(() => {
         const _presetMap = {};
@@ -354,6 +410,10 @@ export const PresetApplyPage: React.FunctionComponent<{
 
         return _presetMap;
     }, [presets]);
+
+    useEffect(() => {
+        fetchFavoritePresets();
+    }, [fetchFavoritePresets]);
 
     /**
      * This is a hack that works around the fact that for whatever reason, componentWillUnmount never fires.
@@ -475,6 +535,7 @@ export const PresetApplyPage: React.FunctionComponent<{
                                             setDynamic(DEFAULT_TUNABLE_SETTINGS.dynamic);
                                             setDynamicTransitionValue(DEFAULT_TUNABLE_SETTINGS.dynamicTransitionValue);
                                             setDynamicIntervalValue(DEFAULT_TUNABLE_SETTINGS.dynamicIntervalValue);
+                                            setStopOnManualChange(DEFAULT_TUNABLE_SETTINGS.stopOnManualChange);
                                         }}
 
                                         size={28}
@@ -543,6 +604,23 @@ export const PresetApplyPage: React.FunctionComponent<{
                                     hass={hass}
                                     extraSelectorProps={{"unit_of_measurement": "seconds"}}
                                 />
+
+                                <Switch
+                                    label={"Stop on manual change"}
+                                    value={stopOnManualChange}
+                                    setValue={(v) => setStopOnManualChange(v)}
+                                />
+                                <div
+                                    style={{
+                                        fontSize: "0.85rem",
+                                        opacity: 0.75,
+                                        marginLeft: "1rem",
+                                        lineHeight: "1.3rem",
+                                        marginBottom: "0.5rem"
+                                    }}
+                                >
+                                    Stops the dynamic scene when any target light is turned off or its color is changed outside this dynamic scene. Brightness-only changes are ignored.
+                                </div>
                             </>
                         }
 
@@ -612,6 +690,7 @@ export const PresetApplyPage: React.FunctionComponent<{
                                         name={name}
                                         interval={dynamicScenes[id]?.interval ?? -1}
                                         transition={dynamicScenes[id]?.transition ?? -1}
+                                        stopOnManualChange={dynamicScenes[id]?.stop_on_manual_change ?? false}
                                         imgSrc={imgSrc}
                                         onClick={(id) => {
                                             handleDynamicSceneTap(id);

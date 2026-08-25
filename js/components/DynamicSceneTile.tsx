@@ -6,6 +6,7 @@ export const DynamicSceneTile :React.FunctionComponent<{
     name: string,
     interval: number,
     transition: number,
+    stopOnManualChange: boolean,
     imgSrc?: string
     onClick?: (name: string) => void
 }> = ({
@@ -13,6 +14,7 @@ export const DynamicSceneTile :React.FunctionComponent<{
     name,
     interval,
     transition,
+    stopOnManualChange,
     imgSrc,
     onClick,
 }): React.JSX.Element => {
@@ -53,7 +55,7 @@ export const DynamicSceneTile :React.FunctionComponent<{
                 <div
                     className={"tile-top-info-container"}
                 >
-                    I: {interval}s, T: {transition}s
+                    I: {interval}s, T: {transition}s{stopOnManualChange ? ", Manual stop" : ""}
                 </div>
 
                 <div
