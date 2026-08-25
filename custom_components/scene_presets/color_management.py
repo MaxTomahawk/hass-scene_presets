@@ -8,6 +8,7 @@ min_angle = 2
 
 white_point = (0.3127, 0.3290)
 
+
 def get_next_smart_random_color(current: Tuple[float, float], options: List[Tuple[float, float]]) -> Tuple[float, float]:
     if len(options) == 1:
         return options[0]
@@ -22,6 +23,13 @@ def get_next_smart_random_color(current: Tuple[float, float], options: List[Tupl
         # Calculate the lengths of the vectors for normalization
         length1 = math.sqrt(vector1[0] ** 2 + vector1[1] ** 2)
         length2 = math.sqrt(vector2[0] ** 2 + vector2[1] ** 2)
+
+        # At the white point the direction vector has no angle. Treat that
+        # transition as safe instead of dividing by zero and killing the
+        # dynamic-scene loop.
+        if length1 <= 1e-12 or length2 <= 1e-12:
+            valid_end_colors.append(color)
+            continue
 
         # Calculate the dot product of normalized vectors to find the cosine of the angle
         dot_product = (vector1[0] / length1) * (vector2[0] / length2) + (vector1[1] / length1) * (vector2[1] / length2)
@@ -44,6 +52,7 @@ def get_next_smart_random_color(current: Tuple[float, float], options: List[Tupl
         # If no valid transition is found, return any random color
         return random.choice(options)
 
+
 def get_next_color(idx: int, options: List[Tuple[float, float]]) -> Tuple[float, float]:
     if len(options) == 1:
         return options[0]
@@ -53,6 +62,7 @@ def get_next_color(idx: int, options: List[Tuple[float, float]]) -> Tuple[float,
 
     return next_color
 
+
 def get_random_color(options: List[Tuple[float, float]]) -> Tuple[float, float]:
     if len(options) == 1:
         return options[0]
@@ -60,6 +70,7 @@ def get_random_color(options: List[Tuple[float, float]]) -> Tuple[float, float]:
     random_color = random.choice(options)
 
     return random_color
+
 
 def get_randomized_colors(options: List[Tuple[float, float]], total: int) -> List[Tuple[float, float]]:
     color_sets_required = math.ceil(total/len(options))
