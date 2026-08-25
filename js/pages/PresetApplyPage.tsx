@@ -205,6 +205,12 @@ export const PresetApplyPage: React.FunctionComponent<{
     const [prettyLastActionPayload, setPrettyLastActionPayload] = useState<string>("");
 
     const fetchFavoritePresets = React.useCallback(() => {
+        // Presets are loaded asynchronously on a fresh browser session. Wait
+        // before migrating legacy favorites so valid IDs are not filtered out.
+        if (presets.length === 0) {
+            return;
+        }
+
         hass.callWS({
             type: "scene_presets/get_favorites",
         }).then(result => {
