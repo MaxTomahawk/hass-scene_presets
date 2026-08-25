@@ -112,6 +112,7 @@ def make_dynamic_scene(module):
     scene._unsub_state_listener = None
     scene._root_context = FakeContext(id="root", user_id="user")
     scene._own_context_ids = set()
+    scene._last_command_monotonic = None
     scene.stops = []
     scene.self_destruct_callback = lambda scene_id: scene.stops.append(scene_id)
     return scene
@@ -166,6 +167,57 @@ def test_turning_any_target_off_stops_scene():
     scene._handle_state_change(event(
         FakeState(state="on", attributes={"color_mode": "xy", "xy_color": [0.4, 0.3]}),
         FakeState(state="off", attributes={}, context=FakeContext(id="external-off")),
+    ))
+
+    assert scene.stops == ["scene-id"]
+
+
+def test_contextless_color_report_immediately_after_scene_command_is_ignored(monkeypatch):
+    module = import_scene_module("dynamic_scenes")
+    scene = make_dynamic_scene(module)
+    scene._last_command_monotonic = 100.0
+    monkeypatch.setattr(module.time, "monotonic", lambda: 101.0)
+
+    scene._handle_state_change(event(
+        FakeState(attributes={"color_mode": "xy", "xy_color": [0.4, 0.3]}),
+        FakeState(
+            attributes={"color_mode": "xy", "xy_color": [0.5, 0.3]},
+            context=FakeContext(id="device-report"),
+        ),
+    ))
+
+    assert scene.stops == []
+
+
+def test_contextless_color_report_after_grace_period_stops_scene(monkeypatch):
+    module = import_scene_module("dynamic_scenes")
+    scene = make_dynamic_scene(module)
+    scene._last_command_monotonic = 100.0
+    monkeypatch.setattr(module.time, "monotonic", lambda: 103.5)
+
+    scene._handle_state_change(event(
+        FakeState(attributes={"color_mode": "xy", "xy_color": [0.4, 0.3]}),
+        FakeState(
+            attributes={"color_mode": "xy", "xy_color": [0.5, 0.3]},
+            context=FakeContext(id="external-device"),
+        ),
+    ))
+
+    assert scene.stops == ["scene-id"]
+
+
+def test_explicit_user_color_change_stops_even_during_grace_period(monkeypatch):
+    module = import_scene_module("dynamic_scenes")
+    scene = make_dynamic_scene(module)
+    scene._last_command_monotonic = 100.0
+    monkeypatch.setattr(module.time, "monotonic", lambda: 101.0)
+
+    scene._handle_state_change(event(
+        FakeState(attributes={"color_mode": "xy", "xy_color": [0.4, 0.3]}),
+        FakeState(
+            attributes={"color_mode": "xy", "xy_color": [0.5, 0.3]},
+            context=FakeContext(id="user-change", user_id="other-user"),
+        ),
     ))
 
     assert scene.stops == ["scene-id"]
