@@ -15,7 +15,8 @@ async def apply_preset(
     transition,
     shuffle,
     smart_shuffle,
-    brightness_override=None
+    brightness_override=None,
+    context=None,
 ):
     preset_data = None
     for preset in PRESET_DATA.get("presets", []):
@@ -78,6 +79,7 @@ async def apply_preset(
             "turn_on",
             light_params,
             blocking=False,
+            context=context,
         )
         tasks.append(task)
 

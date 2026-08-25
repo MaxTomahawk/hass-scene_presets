@@ -3,9 +3,11 @@ import homeassistant.helpers.config_validation as cv
 import logging
 from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import ServiceValidationError
 from .const import *
 
-from .dynamic_scenes import DynamicScene, DynamicSceneManager
+from .dynamic_scenes import DynamicSceneManager
+from .favorites import FavoritesStore
 from .presets import apply_preset
 from .view import async_setup_view, async_remove_view
 from .util import ensure_list, resolve_targets
@@ -28,6 +30,7 @@ START_DYNAMIC_SCENE_SCHEMA = vol.Schema({
     vol.Optional(ATTR_INTERVAL, default=60): vol.Coerce(int),
     vol.Optional(ATTR_BRIGHTNESS): vol.Coerce(int),
     vol.Optional(ATTR_TRANSITION, default=1): vol.Coerce(int),
+    vol.Optional(ATTR_STOP_ON_MANUAL_CHANGE, default=False): cv.boolean,
 })
 
 STOP_DYNAMIC_SCENE_SCHEMA = vol.Schema({
@@ -38,13 +41,36 @@ STOP_DYNAMIC_SCENES_FOR_TARGETS_SCHEMA = vol.Schema({
     vol.Required(ATTR_TARGETS): vol.Any(dict),
 })
 
+FAVORITE_SCHEMA = vol.Schema({
+    vol.Required(ATTR_SCENE_PRESET_ID): cv.string,
+})
+
 
 _LOGGER = logging.getLogger(__name__)
 
 dynamic_scene_manager = DynamicSceneManager()
 
 
+def _get_favorites_store(hass):
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if DATA_FAVORITES_STORE not in domain_data:
+        domain_data[DATA_FAVORITES_STORE] = FavoritesStore(hass)
+    return domain_data[DATA_FAVORITES_STORE]
+
+
+def _get_call_user_id(call):
+    user_id = call.context.user_id
+    if not user_id:
+        raise ServiceValidationError(
+            "Favorite actions require a Home Assistant user context. "
+            "Call this action from an authenticated dashboard/user action."
+        )
+    return user_id
+
+
 async def async_setup(hass, config):
+    favorites_store = _get_favorites_store(hass)
+
     async def apply_preset_service(call):
         preset_id = call.data.get(ATTR_SCENE_PRESET_ID)
         targets = call.data.get(ATTR_TARGETS)
@@ -59,7 +85,6 @@ async def async_setup(hass, config):
         floor_ids = ensure_list(targets.get("floor_id"))
         label_ids = ensure_list(targets.get("label_id"))
 
-
         light_entity_ids = resolve_targets(hass, entity_ids, device_ids, area_ids, floor_ids, label_ids)
 
         await apply_preset(
@@ -69,9 +94,9 @@ async def async_setup(hass, config):
             transition,
             shuffle,
             smart_shuffle,
-            brightness_override
+            brightness_override,
+            context=call.context,
         )
-
 
     async def start_dynamic_scene(call):
         # always stop any existing actions first
@@ -83,6 +108,7 @@ async def async_setup(hass, config):
 
         brightness_override = call.data.get(ATTR_BRIGHTNESS)
         transition = call.data.get(ATTR_TRANSITION, 1)
+        stop_on_manual_change = call.data.get(ATTR_STOP_ON_MANUAL_CHANGE, False)
         shuffle = True
 
         entity_ids = ensure_list(targets.get("entity_id"))
@@ -100,14 +126,15 @@ async def async_setup(hass, config):
                 "light_entity_ids": light_entity_ids,
                 "brightness": brightness_override,
                 "transition": transition,
-                "shuffle": shuffle
+                "shuffle": shuffle,
+                "stop_on_manual_change": stop_on_manual_change,
             },
-            interval
+            interval,
+            parent_context=call.context,
         )
 
     async def stop_dynamic_scene(call):
         scene_id = call.data.get(ATTR_DYNAMIC_SCENE_ID)
-
         dynamic_scene_manager.delete_by_id(scene_id)
 
     async def stop_dynamic_scenes_for_targets(call):
@@ -132,6 +159,26 @@ async def async_setup(hass, config):
     async def get_dynamic_scenes(call):
         return dynamic_scene_manager.get_all_as_dict()
 
+    async def add_favorite(call):
+        user_id = _get_call_user_id(call)
+        try:
+            await favorites_store.async_add(user_id, call.data.get(ATTR_SCENE_PRESET_ID))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    async def remove_favorite(call):
+        user_id = _get_call_user_id(call)
+        try:
+            await favorites_store.async_remove(user_id, call.data.get(ATTR_SCENE_PRESET_ID))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    async def toggle_favorite(call):
+        user_id = _get_call_user_id(call)
+        try:
+            await favorites_store.async_toggle(user_id, call.data.get(ATTR_SCENE_PRESET_ID))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
 
     hass.services.async_register(
         DOMAIN,
@@ -175,8 +222,29 @@ async def async_setup(hass, config):
         stop_all_dynamic_scenes,
     )
 
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ADD_FAVORITE,
+        add_favorite,
+        schema=FAVORITE_SCHEMA,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REMOVE_FAVORITE,
+        remove_favorite,
+        schema=FAVORITE_SCHEMA,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_TOGGLE_FAVORITE,
+        toggle_favorite,
+        schema=FAVORITE_SCHEMA,
+    )
 
     return True
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry
@@ -185,12 +253,16 @@ async def async_setup_entry(
 
     await async_setup_view(hass)
 
-    async_setup_websocket_api(hass, dynamic_scene_manager)
+    async_setup_websocket_api(
+        hass,
+        dynamic_scene_manager,
+        _get_favorites_store(hass),
+    )
 
     return True
+
 
 async def async_remove_entry(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
-
     await async_remove_view(hass)

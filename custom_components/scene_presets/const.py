@@ -9,6 +9,9 @@ SERVICE_STOP_DYNAMIC_SCENE = "stop_dynamic_scene"
 SERVICE_STOP_ALL_DYNAMIC_SCENES = "stop_all_dynamic_scenes"
 SERVICE_STOP_DYNAMIC_SCENES_FOR_TARGETS = "stop_dynamic_scenes_for_targets"
 SERVICE_GET_DYNAMIC_SCENES = "get_dynamic_scenes"
+SERVICE_ADD_FAVORITE = "add_favorite"
+SERVICE_REMOVE_FAVORITE = "remove_favorite"
+SERVICE_TOGGLE_FAVORITE = "toggle_favorite"
 
 ATTR_SCENE_PRESET_ID = "preset_id"
 ATTR_TARGETS = "targets"
@@ -17,5 +20,8 @@ ATTR_TRANSITION = "transition"
 ATTR_SHUFFLE = "shuffle"
 ATTR_SMART_SHUFFLE = "smart_shuffle"
 ATTR_INTERVAL = "interval"
+ATTR_STOP_ON_MANUAL_CHANGE = "stop_on_manual_change"
 
 ATTR_DYNAMIC_SCENE_ID = "id"
+
+DATA_FAVORITES_STORE = "favorites_store"

@@ -100,6 +100,12 @@ start_dynamic_scene:
           min: 0
           max: 300
           unit_of_measurement: seconds
+    stop_on_manual_change:
+      name: "Stop on manual change"
+      description: "Stops the dynamic scene when any target light is turned off or its color is changed outside this dynamic scene. Brightness-only changes are ignored."
+      example: true
+      selector:
+        boolean:
 
 stop_dynamic_scene:
   name: "Stop dynamic scene"
@@ -131,3 +137,36 @@ stop_dynamic_scenes_for_targets:
 stop_all_dynamic_scenes:
   name: "Stop all dynamic scenes"
   description: Stops all currently running dynamic scenes
+
+add_favorite:
+  name: "Add favorite"
+  description: Add a preset to the current Home Assistant user's favorites
+  fields:
+    preset_id:
+      name: "Preset"
+      description: "The preset ID to add"
+      required: true
+      selector:
+        text:
+
+remove_favorite:
+  name: "Remove favorite"
+  description: Remove a preset from the current Home Assistant user's favorites
+  fields:
+    preset_id:
+      name: "Preset"
+      description: "The preset ID to remove"
+      required: true
+      selector:
+        text:
+
+toggle_favorite:
+  name: "Toggle favorite"
+  description: Toggle a preset in the current Home Assistant user's favorites
+  fields:
+    preset_id:
+      name: "Preset"
+      description: "The preset ID to toggle"
+      required: true
+      selector:
+        text:
