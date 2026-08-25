@@ -3,7 +3,7 @@ name: Feature CI
 on:
   push:
     branches:
-      - feature/manual-change-and-user-favorites
+      - 'feature/**'
 
 permissions:
   contents: read
