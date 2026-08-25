@@ -1,9 +1,31 @@
 """Helpers for detecting external color changes to dynamic scenes."""
 
+from dataclasses import dataclass
+import math
+
 XY_TOLERANCE = 0.002
 HS_TOLERANCE = 0.5
 COLOR_TEMP_KELVIN_TOLERANCE = 20
 RGB_TOLERANCE = 1
+EXPECTED_MOVE_MARGIN_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class ExpectedColorMove:
+    """One color transition that a dynamic scene expects a light to report."""
+
+    color_kind: str
+    source_color: object
+    target_color: object
+    started_at: float
+    transition: float
+
+    def is_active(self, now):
+        return now <= (
+            self.started_at
+            + max(float(self.transition or 0), 0.0)
+            + EXPECTED_MOVE_MARGIN_SECONDS
+        )
 
 
 def _tuple_or_value(value):
@@ -33,9 +55,6 @@ def color_signature(attributes):
             attributes.get("rgbww_color", attributes.get("rgb_color"))
         )
 
-    # Modes such as onoff/brightness/white do not expose an independent color
-    # value here. Brightness is deliberately excluded so dimming never counts
-    # as a manual color change.
     return mode, None
 
 
@@ -113,6 +132,81 @@ def color_changed(old_attributes, new_attributes):
         )
 
     return False
+
+
+def _distance(value, target):
+    if value is None or target is None:
+        return None
+
+    if isinstance(value, (list, tuple)) and isinstance(target, (list, tuple)):
+        if len(value) != len(target):
+            return None
+        return math.sqrt(
+            sum((float(a) - float(b)) ** 2 for a, b in zip(value, target))
+        )
+
+    try:
+        return abs(float(value) - float(target))
+    except (TypeError, ValueError):
+        return 0.0 if value == target else None
+
+
+def _state_value_for_expected_move(expected, attributes):
+    if expected.color_kind == "xy":
+        return _tuple_or_value(attributes.get("xy_color"))
+    if expected.color_kind == "color_temp":
+        return attributes.get("color_temp_kelvin")
+    if expected.color_kind == "hs":
+        return _tuple_or_value(attributes.get("hs_color"))
+    if expected.color_kind == "rgb":
+        return _tuple_or_value(attributes.get("rgb_color"))
+    if expected.color_kind == "rgbw":
+        return _tuple_or_value(
+            attributes.get("rgbw_color", attributes.get("rgb_color"))
+        )
+    if expected.color_kind == "rgbww":
+        return _tuple_or_value(
+            attributes.get("rgbww_color", attributes.get("rgb_color"))
+        )
+    return None
+
+
+def _progress_tolerance(expected):
+    if expected.color_kind == "xy":
+        return XY_TOLERANCE
+    if expected.color_kind == "color_temp":
+        return COLOR_TEMP_KELVIN_TOLERANCE
+    if expected.color_kind == "hs":
+        return HS_TOLERANCE
+    return RGB_TOLERANCE
+
+
+def is_expected_move_progress(expected, old_attributes, new_attributes, now):
+    """Return True if a contextless state report is compatible with our move."""
+    if expected is None or not expected.is_active(now):
+        return False
+
+    new_value = _state_value_for_expected_move(expected, new_attributes)
+    if new_value is None:
+        return False
+
+    target_distance = _distance(new_value, expected.target_color)
+    if target_distance is None:
+        return False
+
+    tolerance = _progress_tolerance(expected)
+    if target_distance <= tolerance:
+        return True
+
+    old_value = _state_value_for_expected_move(expected, old_attributes)
+    reference = old_value if old_value is not None else expected.source_color
+    reference_distance = _distance(reference, expected.target_color)
+    if reference_distance is None:
+        return False
+
+    # Genuine scene progress must not move farther away from the target. A
+    # small tolerance absorbs device-side conversion/rounding noise.
+    return target_distance <= reference_distance + tolerance
 
 
 def is_scene_context(context_id, parent_id, root_context_id, own_context_ids):
