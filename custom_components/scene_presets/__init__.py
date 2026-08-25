@@ -7,7 +7,11 @@ from homeassistant.exceptions import ServiceValidationError
 from .const import *
 
 from .dynamic_scenes import DynamicSceneManager
-from .favorite_actions import async_get_favorites_response, async_is_favorite_response
+from .favorite_actions import (
+    async_get_favorites_response,
+    async_is_favorite_response,
+    async_resolve_favorite_user_id,
+)
 from .favorites import FavoritesStore
 from .presets import apply_preset
 from .view import async_setup_view, async_remove_view
@@ -42,8 +46,18 @@ STOP_DYNAMIC_SCENES_FOR_TARGETS_SCHEMA = vol.Schema({
     vol.Required(ATTR_TARGETS): vol.Any(dict),
 })
 
+GET_FAVORITES_SCHEMA = vol.Schema({
+    vol.Optional(ATTR_USER_ID): cv.string,
+})
+
 FAVORITE_SCHEMA = vol.Schema({
     vol.Required(ATTR_SCENE_PRESET_ID): cv.string,
+    vol.Optional(ATTR_USER_ID): cv.string,
+})
+
+SET_FAVORITES_SCHEMA = vol.Schema({
+    vol.Required(ATTR_FAVORITES): [cv.string],
+    vol.Optional(ATTR_USER_ID): cv.string,
 })
 
 
@@ -59,14 +73,15 @@ def _get_favorites_store(hass):
     return domain_data[DATA_FAVORITES_STORE]
 
 
-def _get_call_user_id(call):
-    user_id = call.context.user_id
-    if not user_id:
-        raise ServiceValidationError(
-            "Favorite actions require a Home Assistant user context. "
-            "Call this action from an authenticated dashboard/user action."
+async def _resolve_favorite_action_user(hass, call):
+    try:
+        return await async_resolve_favorite_user_id(
+            hass,
+            getattr(call.context, "user_id", None),
+            call.data.get(ATTR_USER_ID),
         )
-    return user_id
+    except (ValueError, PermissionError) as err:
+        raise ServiceValidationError(str(err)) from err
 
 
 async def async_setup(hass, config):
@@ -161,33 +176,40 @@ async def async_setup(hass, config):
         return dynamic_scene_manager.get_all_as_dict()
 
     async def get_favorites(call):
-        user_id = _get_call_user_id(call)
+        user_id = await _resolve_favorite_action_user(hass, call)
         return await async_get_favorites_response(favorites_store, user_id)
 
     async def is_favorite(call):
-        user_id = _get_call_user_id(call)
+        user_id = await _resolve_favorite_action_user(hass, call)
         return await async_is_favorite_response(
             favorites_store,
             user_id,
             call.data.get(ATTR_SCENE_PRESET_ID),
         )
 
+    async def set_favorites(call):
+        user_id = await _resolve_favorite_action_user(hass, call)
+        try:
+            await favorites_store.async_set(user_id, call.data.get(ATTR_FAVORITES))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
     async def add_favorite(call):
-        user_id = _get_call_user_id(call)
+        user_id = await _resolve_favorite_action_user(hass, call)
         try:
             await favorites_store.async_add(user_id, call.data.get(ATTR_SCENE_PRESET_ID))
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
 
     async def remove_favorite(call):
-        user_id = _get_call_user_id(call)
+        user_id = await _resolve_favorite_action_user(hass, call)
         try:
             await favorites_store.async_remove(user_id, call.data.get(ATTR_SCENE_PRESET_ID))
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
 
     async def toggle_favorite(call):
-        user_id = _get_call_user_id(call)
+        user_id = await _resolve_favorite_action_user(hass, call)
         try:
             await favorites_store.async_toggle(user_id, call.data.get(ATTR_SCENE_PRESET_ID))
         except ValueError as err:
@@ -239,6 +261,7 @@ async def async_setup(hass, config):
         DOMAIN,
         SERVICE_GET_FAVORITES,
         get_favorites,
+        schema=GET_FAVORITES_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
 
@@ -248,6 +271,13 @@ async def async_setup(hass, config):
         is_favorite,
         schema=FAVORITE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_FAVORITES,
+        set_favorites,
+        schema=SET_FAVORITES_SCHEMA,
     )
 
     hass.services.async_register(
@@ -292,8 +322,16 @@ async def async_setup_entry(
     return True
 
 
+async def async_unload_entry(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> bool:
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+    if unload_ok:
+        await async_remove_view(hass)
+    return unload_ok
+
+
 async def async_remove_entry(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
-    await hass.config_entries.async_unload_platforms(entry, ["sensor"])
     await async_remove_view(hass)
