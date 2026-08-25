@@ -19,6 +19,7 @@ from .const import *
 _LOGGER = logging.getLogger(__name__)
 
 MAX_OWN_CONTEXT_IDS = 64
+MAX_EXPECTED_MOVES_PER_LIGHT = 32
 
 
 class DynamicScene:
@@ -75,13 +76,38 @@ class DynamicScene:
         for move in moves:
             if move.color_kind is None or move.target_color is None:
                 continue
-            self._expected_moves[move.entity_id] = ExpectedColorMove(
+            expected = ExpectedColorMove(
                 color_kind=move.color_kind,
                 source_color=move.source_color,
                 target_color=move.target_color,
                 started_at=started_at,
                 transition=move.transition,
             )
+            queue = self._expected_moves.get(move.entity_id)
+            if not isinstance(queue, deque):
+                queue = deque(maxlen=MAX_EXPECTED_MOVES_PER_LIGHT)
+                self._expected_moves[move.entity_id] = queue
+            queue.append(expected)
+
+    def _active_expected_moves(self, entity_id, now):
+        expected = self._expected_moves.get(entity_id)
+        if expected is None:
+            return []
+
+        # Preserve compatibility with tests/older in-memory instances that
+        # may contain one ExpectedColorMove instead of a deque.
+        if not isinstance(expected, deque):
+            return [expected] if expected.is_active(now) else []
+
+        active = deque(
+            (move for move in expected if move.is_active(now)),
+            maxlen=MAX_EXPECTED_MOVES_PER_LIGHT,
+        )
+        if active:
+            self._expected_moves[entity_id] = active
+        else:
+            self._expected_moves.pop(entity_id, None)
+        return list(active)
 
     @callback
     def _handle_state_change(self, event):
@@ -119,26 +145,24 @@ class DynamicScene:
         ):
             return
 
-        # A Home Assistant user explicitly causing an unknown-context color
-        # change is always an override, even if that color happens to be on
-        # the path toward our current target.
         if getattr(context, "user_id", None) is not None:
             self._stop_for_manual_change("external_color_change", entity_id)
             return
 
-        expected_move = self._expected_moves.get(entity_id)
-        if is_expected_move_progress(
-            expected_move,
-            old_state.attributes,
-            new_state.attributes,
-            time.monotonic(),
-        ):
-            _LOGGER.debug(
-                "Ignoring expected contextless color progress for %s in dynamic scene %s",
-                entity_id,
-                self.id,
-            )
-            return
+        now = time.monotonic()
+        for expected_move in self._active_expected_moves(entity_id, now):
+            if is_expected_move_progress(
+                expected_move,
+                old_state.attributes,
+                new_state.attributes,
+                now,
+            ):
+                _LOGGER.debug(
+                    "Ignoring expected contextless color progress for %s in dynamic scene %s",
+                    entity_id,
+                    self.id,
+                )
+                return
 
         self._stop_for_manual_change("external_color_change", entity_id)
 
@@ -221,7 +245,7 @@ class DynamicScene:
                 await asyncio.sleep(self.interval)
         except asyncio.CancelledError:
             raise
-        except Exception as err:  # integration boundary: never leave a zombie task
+        except Exception as err:
             _LOGGER.exception("Dynamic scene %s failed", self.id)
             self._self_destruct("error", err)
 
