@@ -9,6 +9,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .color_moves import apply_light_moves, build_light_moves
 from .manual_change import (
+    EXPECTED_MOVE_MARGIN_SECONDS,
     ExpectedColorMove,
     color_changed,
     is_expected_move_progress,
@@ -76,12 +77,27 @@ class DynamicScene:
         for move in moves:
             if move.color_kind is None or move.target_color is None:
                 continue
+
+            # Intermediate progress is only trusted during the actual
+            # transition, but an exact requested target can arrive later from
+            # a device integration. Keep exact-target acknowledgement valid
+            # until the next scene step, or through the transition when that
+            # lasts longer than the interval.
+            acknowledge_until = (
+                started_at
+                + max(
+                    float(self.interval or 0),
+                    float(move.transition or 0),
+                )
+                + EXPECTED_MOVE_MARGIN_SECONDS
+            )
             expected = ExpectedColorMove(
                 color_kind=move.color_kind,
                 source_color=move.source_color,
                 target_color=move.target_color,
                 started_at=started_at,
                 transition=move.transition,
+                acknowledge_until=acknowledge_until,
             )
             queue = self._expected_moves.get(move.entity_id)
             if not isinstance(queue, deque):
@@ -97,10 +113,10 @@ class DynamicScene:
         # Preserve compatibility with tests/older in-memory instances that
         # may contain one ExpectedColorMove instead of a deque.
         if not isinstance(expected, deque):
-            return [expected] if expected.is_active(now) else []
+            return [expected] if expected.is_relevant(now) else []
 
         active = deque(
-            (move for move in expected if move.is_active(now)),
+            (move for move in expected if move.is_relevant(now)),
             maxlen=MAX_EXPECTED_MOVES_PER_LIGHT,
         )
         if active:
