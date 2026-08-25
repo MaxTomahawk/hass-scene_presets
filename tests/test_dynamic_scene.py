@@ -31,17 +31,29 @@ def import_scene_module(name):
     package.__path__ = [str(PACKAGE_PATH)]
     sys.modules["custom_components.scene_presets"] = package
 
+    homeassistant = types.ModuleType("homeassistant")
+    homeassistant.__path__ = []
+    sys.modules["homeassistant"] = homeassistant
+
     core = types.ModuleType("homeassistant.core")
     core.Context = FakeContext
     core.callback = lambda fn: fn
-    sys.modules["homeassistant"] = types.ModuleType("homeassistant")
     sys.modules["homeassistant.core"] = core
 
     helpers = types.ModuleType("homeassistant.helpers")
+    helpers.__path__ = []
     event = types.ModuleType("homeassistant.helpers.event")
     event.async_track_state_change_event = lambda hass, entity_ids, callback: (lambda: None)
     sys.modules["homeassistant.helpers"] = helpers
     sys.modules["homeassistant.helpers.event"] = event
+
+    util = types.ModuleType("homeassistant.util")
+    util.__path__ = []
+    color = types.ModuleType("homeassistant.util.color")
+    color.color_RGB_to_xy = lambda r, g, b: (0.0, 0.0)
+    color.color_temperature_to_rgb = lambda kelvin: (255, 255, 255)
+    sys.modules["homeassistant.util"] = util
+    sys.modules["homeassistant.util.color"] = color
 
     return importlib.import_module(f"custom_components.scene_presets.{name}")
 
